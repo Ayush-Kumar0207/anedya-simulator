@@ -1,10 +1,12 @@
 const axios = require('axios');
+const express = require('express'); // NEW: Import the web framework
 
-// Your exact credentials
-const CONNECTION_KEY = 'YOUR_CONNECTION_KEY_HERE';
-// ⚠️ REPLACE THIS WITH YOUR NEW MASTER API KEY ⚠️
-const API_KEY = 'YOUR_MASTER_API_KEY_HERE';
-const NODE_ID = 'YOUR_NODE_ID_HERE';
+const app = express(); // NEW: Create a dummy app
+
+// Securely read keys from Render's Environment Variables
+const CONNECTION_KEY = process.env.CONNECTION_KEY;
+const API_KEY = process.env.API_KEY;
+const NODE_ID = process.env.NODE_ID;
 
 const DEVICE_URL = 'https://device.ap-in-1.anedya.io/v1';
 const CLOUD_URL = 'https://api.ap-in-1.anedya.io/v1';
@@ -70,7 +72,6 @@ async function fetchCommands() {
 }
 
 console.log(`🚀 Anedya IoT Hardware Simulator (STRICT CLOUD MODE)`);
-console.log(`- Node ID: ${NODE_ID}`);
 console.log(`- Communication: Strict Cloud API (AP-IN-1)`);
 console.log('----------------------------------------------------');
 
@@ -78,3 +79,16 @@ console.log('----------------------------------------------------');
 setInterval(sendTelemetry, 5000);
 setInterval(fetchCommands, 2000);
 sendTelemetry();
+
+// ==========================================
+// RENDER "WEB SERVICE" HACK 
+// This keeps the free tier instance alive!
+// ==========================================
+const PORT = process.env.PORT || 3000;
+app.get('/', (req, res) => {
+    res.send('Simulator is running 24/7 in the background!');
+});
+
+app.listen(PORT, () => {
+    console.log(`🌐 Dummy Web Server listening on port ${PORT} to satisfy Render.`);
+});
