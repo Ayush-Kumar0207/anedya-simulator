@@ -1,94 +1,92 @@
-const axios = require('axios');
-const express = require('express'); // NEW: Import the web framework
+const http = require('node:http');
 
-const app = express(); // NEW: Create a dummy app
+const REQUIRED_ENV = ['CONNECTION_KEY', 'API_KEY', 'NODE_ID'];
+const missing = REQUIRED_ENV.filter((name) => !process.env[name]);
+if (missing.length > 0) {
+  console.error(`Missing required environment variables: ${missing.join(', ')}`);
+  process.exit(1);
+}
 
-// Securely read keys from Render's Environment Variables
 const CONNECTION_KEY = process.env.CONNECTION_KEY;
 const API_KEY = process.env.API_KEY;
 const NODE_ID = process.env.NODE_ID;
-
 const DEVICE_URL = 'https://device.ap-in-1.anedya.io/v1';
 const CLOUD_URL = 'https://api.ap-in-1.anedya.io/v1';
+const startedAt = Date.now();
+const state = { lastTelemetrySuccess: null, lastTelemetryError: null, lastCommandPollSuccess: null, relay: 'UNKNOWN' };
 
-/**
- * Send random telemetry to Anedya Device Cloud
- * Directly uses the Device API with Connection Key
- */
+async function post(url, payload, headers) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(10000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`${response.status}: ${data.error || response.statusText}`);
+  return data;
+}
+
 async function sendTelemetry() {
-    const temperature = parseFloat((Math.random() * (30 - 20) + 20).toFixed(2));
-    const humidity = parseFloat((Math.random() * (60 - 40) + 40).toFixed(2));
-    const timestamp = Date.now();
-
-    // FORCE strict JSON formatting to bypass Anedya's invalid_json filter
-    const payload = JSON.stringify({
-        data: [
-            { variable: 'temperature', value: temperature, timestamp: timestamp },
-            { variable: 'humidity', value: humidity, timestamp: timestamp }
-        ]
-    });
-
-    try {
-        await axios.post(`${DEVICE_URL}/submitData`, payload, {
-            headers: {
-                'Content-Type': 'application/json',
-                'Auth-mode': 'key',
-                'Authorization': CONNECTION_KEY
-            }
-        });
-        console.log(`[Telemetry] Sent to Cloud: Temp=${temperature}°C, Hum=${humidity}%`);
-    } catch (error) {
-        console.error(`[Telemetry Error]: ${error.response?.status || 'Unknown'} - ${JSON.stringify(error.response?.data) || error.message}`);
-    }
+  const temperature = Number((Math.random() * 10 + 20).toFixed(2));
+  const humidity = Number((Math.random() * 20 + 40).toFixed(2));
+  try {
+    await post(`${DEVICE_URL}/submitData`, {
+      data: [
+        { variable: 'temperature', value: temperature, timestamp: Date.now() },
+        { variable: 'humidity', value: humidity, timestamp: Date.now() },
+      ],
+    }, { 'Auth-mode': 'key', Authorization: CONNECTION_KEY });
+    state.lastTelemetrySuccess = new Date().toISOString();
+    state.lastTelemetryError = null;
+    console.log(`[Telemetry] Temp=${temperature}°C Hum=${humidity}%`);
+  } catch (error) {
+    state.lastTelemetryError = error.message;
+    console.error(`[Telemetry Error] ${error.message}`);
+  }
 }
 
-/**
- * Poll for pending commands from Cloud
- * Directly uses the Cloud API with Project API Key
- */
 async function fetchCommands() {
-    try {
-        // Force strict JSON formatting here too, just to be safe
-        const payload = JSON.stringify({ nodeId: NODE_ID });
-
-        const response = await axios.post(`${CLOUD_URL}/commands/fetch`, payload, {
-            headers: {
-                'Authorization': `Bearer ${API_KEY}`,
-                'Content-Type': 'application/json'
-            }
-        });
-
-        if (response.data.success && response.data.commands) {
-            response.data.commands.forEach(cmd => {
-                console.log(`\n🔔 [Command Received] -> ${cmd.command}: ${cmd.data}`);
-                if (cmd.command === 'toggle-relay') {
-                    console.log(`✅ Hardware Relay state updated to: ${cmd.data}\n`);
-                }
-            });
-        }
-    } catch (error) {
-        // Silent error for polling frequency
+  try {
+    const data = await post(`${CLOUD_URL}/commands/fetch`, { nodeId: NODE_ID }, { Authorization: `Bearer ${API_KEY}` });
+    state.lastCommandPollSuccess = new Date().toISOString();
+    for (const command of data.commands || []) {
+      if (command.command === 'toggle-relay') state.relay = command.data;
+      console.log(`[Command] ${command.command}: ${command.data}`);
     }
+  } catch (error) {
+    if (!error.message.startsWith('404:')) console.error(`[Command Poll Error] ${error.message}`);
+  }
 }
 
-console.log(`🚀 Anedya IoT Hardware Simulator (STRICT CLOUD MODE)`);
-console.log(`- Communication: Strict Cloud API (AP-IN-1)`);
-console.log('----------------------------------------------------');
+function sendJson(res, status, body) {
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
 
-// Main loop
-setInterval(sendTelemetry, 5000);
-setInterval(fetchCommands, 2000);
-sendTelemetry();
-
-// ==========================================
-// RENDER "WEB SERVICE" HACK 
-// This keeps the free tier instance alive!
-// ==========================================
-const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => {
-    res.send('Simulator is running 24/7 in the background!');
+const server = http.createServer((req, res) => {
+  if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' });
+  if (req.url === '/health') {
+    const lastSuccess = state.lastTelemetrySuccess ? Date.parse(state.lastTelemetrySuccess) : 0;
+    const healthy = lastSuccess > 0 && Date.now() - lastSuccess < 60000;
+    return sendJson(res, healthy ? 200 : 503, {
+      status: healthy ? 'ok' : 'degraded',
+      uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+      ...state,
+    });
+  }
+  if (req.url === '/') return sendJson(res, 200, { service: 'anedya-simulator', status: 'running', nodeId: NODE_ID, relay: state.relay });
+  return sendJson(res, 404, { error: 'Not found' });
 });
 
-app.listen(PORT, () => {
-    console.log(`🌐 Dummy Web Server listening on port ${PORT} to satisfy Render.`);
+const telemetryTimer = setInterval(sendTelemetry, 5000);
+const commandTimer = setInterval(fetchCommands, 2000);
+telemetryTimer.unref();
+commandTimer.unref();
+
+const PORT = Number(process.env.PORT || 3000);
+server.listen(PORT, () => {
+  console.log(`Anedya simulator listening on ${PORT}`);
+  sendTelemetry();
+  fetchCommands();
 });
