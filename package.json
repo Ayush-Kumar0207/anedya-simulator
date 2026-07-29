@@ -1,14 +1,19 @@
 {
   "name": "anedya-simulator",
-  "version": "1.0.0",
-  "main": "index.js",
+  "version": "1.1.0",
+  "description": "Cloud-hosted Anedya IoT telemetry and command simulator",
+  "main": "simulator.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node simulator.js",
+    "check": "node --check simulator.js",
+    "test": "npm run check"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": ["iot", "anedya", "simulator", "cloud"],
+  "author": "Ayush Kumar",
   "license": "ISC",
-  "description": "",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "axios": "^1.13.6",
     "express": "^5.2.1"
