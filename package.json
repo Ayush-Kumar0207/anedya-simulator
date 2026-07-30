@@ -5,8 +5,8 @@
   "main": "simulator.js",
   "scripts": {
     "start": "node simulator.js",
-    "check": "node --check simulator.js",
-    "test": "npm run check"
+    "check": "node --check simulator.js && node --check simulator.test.js",
+    "test": "node --test simulator.test.js"
   },
   "keywords": ["iot", "anedya", "simulator", "cloud"],
   "author": "Ayush Kumar",
