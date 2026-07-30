@@ -1,19 +1,24 @@
 const http = require('node:http');
 
-const REQUIRED_ENV = ['CONNECTION_KEY', 'API_KEY', 'NODE_ID'];
-const missing = REQUIRED_ENV.filter((name) => !process.env[name]);
-if (missing.length > 0) {
+const REQUIRED_ENV = ['CONNECTION_KEY', 'NODE_ID'];
+const missing = REQUIRED_ENV.filter((name) => !process.env[name]?.trim());
+if (require.main === module && missing.length > 0) {
   console.error(`Missing required environment variables: ${missing.join(', ')}`);
   process.exit(1);
 }
 
-const CONNECTION_KEY = process.env.CONNECTION_KEY;
-const API_KEY = process.env.API_KEY;
-const NODE_ID = process.env.NODE_ID;
+const CONNECTION_KEY = process.env.CONNECTION_KEY?.trim();
+const NODE_ID = process.env.NODE_ID?.trim();
 const DEVICE_URL = 'https://device.ap-in-1.anedya.io/v1';
-const CLOUD_URL = 'https://api.ap-in-1.anedya.io/v1';
+const DEVICE_HEADERS = { 'Auth-mode': 'key', Authorization: CONNECTION_KEY };
 const startedAt = Date.now();
-const state = { lastTelemetrySuccess: null, lastTelemetryError: null, lastCommandPollSuccess: null, relay: 'UNKNOWN' };
+const state = {
+  lastTelemetrySuccess: null,
+  lastTelemetryError: null,
+  lastCommandPollSuccess: null,
+  lastCommandPollError: null,
+  relay: 'UNKNOWN',
+};
 
 async function post(url, payload, headers) {
   const response = await fetch(url, {
@@ -23,7 +28,9 @@ async function post(url, payload, headers) {
     signal: AbortSignal.timeout(10000),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`${response.status}: ${data.error || response.statusText}`);
+  const detail = data.error || response.statusText || 'Anedya request rejected';
+  if (!response.ok) throw new Error(`${response.status}: ${detail}`);
+  if (data.success === false) throw new Error(detail);
   return data;
 }
 
@@ -36,7 +43,7 @@ async function sendTelemetry() {
         { variable: 'temperature', value: temperature, timestamp: Date.now() },
         { variable: 'humidity', value: humidity, timestamp: Date.now() },
       ],
-    }, { 'Auth-mode': 'key', Authorization: CONNECTION_KEY });
+    }, DEVICE_HEADERS);
     state.lastTelemetrySuccess = new Date().toISOString();
     state.lastTelemetryError = null;
     console.log(`[Telemetry] Temp=${temperature}°C Hum=${humidity}%`);
@@ -48,14 +55,39 @@ async function sendTelemetry() {
 
 async function fetchCommands() {
   try {
-    const data = await post(`${CLOUD_URL}/commands/fetch`, { nodeId: NODE_ID }, { Authorization: `Bearer ${API_KEY}` });
-    state.lastCommandPollSuccess = new Date().toISOString();
-    for (const command of data.commands || []) {
-      if (command.command === 'toggle-relay') state.relay = command.data;
+    const command = await post(`${DEVICE_URL}/commands/next`, {}, DEVICE_HEADERS);
+    if (!command.commandId) {
+      state.lastCommandPollSuccess = new Date().toISOString();
+      state.lastCommandPollError = null;
+      return;
+    }
+
+    let status = 'success';
+    let acknowledgement = 'Command processed';
+    if (command.command !== 'toggle-relay') {
+      status = 'failure';
+      acknowledgement = `Unsupported command: ${command.command || 'unknown'}`;
+    } else if (!['ON', 'OFF'].includes(command.data)) {
+      status = 'failure';
+      acknowledgement = `Invalid relay state: ${command.data}`;
+    } else {
+      state.relay = command.data;
       console.log(`[Command] ${command.command}: ${command.data}`);
     }
+
+    await post(`${DEVICE_URL}/commands/updateStatus`, {
+      commandId: command.commandId,
+      status,
+      ackdata: acknowledgement,
+      ackdatatype: 'string',
+    }, DEVICE_HEADERS);
+
+    if (status === 'failure') throw new Error(acknowledgement);
+    state.lastCommandPollSuccess = new Date().toISOString();
+    state.lastCommandPollError = null;
   } catch (error) {
-    if (!error.message.startsWith('404:')) console.error(`[Command Poll Error] ${error.message}`);
+    state.lastCommandPollError = error.message;
+    console.error(`[Command Poll Error] ${error.message}`);
   }
 }
 
@@ -79,14 +111,40 @@ const server = http.createServer((req, res) => {
   return sendJson(res, 404, { error: 'Not found' });
 });
 
-const telemetryTimer = setInterval(sendTelemetry, 5000);
-const commandTimer = setInterval(fetchCommands, 2000);
-telemetryTimer.unref();
-commandTimer.unref();
+function start() {
+  const port = Number(process.env.PORT || 3000);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be an integer between 1 and 65535');
 
-const PORT = Number(process.env.PORT || 3000);
-server.listen(PORT, () => {
-  console.log(`Anedya simulator listening on ${PORT}`);
-  sendTelemetry();
-  fetchCommands();
-});
+  const telemetryTimer = setInterval(sendTelemetry, 5000);
+  const commandTimer = setInterval(fetchCommands, 2000);
+  telemetryTimer.unref();
+  commandTimer.unref();
+
+  server.listen(port, () => {
+    console.log(`Anedya simulator listening on ${port}`);
+    sendTelemetry();
+    fetchCommands();
+  });
+
+  const shutdown = () => {
+    clearInterval(telemetryTimer);
+    clearInterval(commandTimer);
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(1), 10000).unref();
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
+
+  return { server, telemetryTimer, commandTimer };
+}
+
+if (require.main === module) {
+  try {
+    start();
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
+}
+
+module.exports = { fetchCommands, sendTelemetry, start, state };
